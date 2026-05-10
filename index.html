@@ -1411,24 +1411,159 @@ function buildPayload() {
   };
 }
 function applyRemoteData(payload) {
-  if (payload.teacherSchedules) for (const [t,s] of Object.entries(payload.teacherSchedules)) if (teacherData[t]!==undefined) teacherData[t]=s;
-  if (payload.teacherDisplayNames) for (const [t,n] of Object.entries(payload.teacherDisplayNames)) if (teacherDisplayNames[t]!==undefined) teacherDisplayNames[t]=n;
-  if (payload.classSchedules) for (const [cls,sessions] of Object.entries(payload.classSchedules)) if (classData[cls]) for (const [sess,days] of Object.entries(sessions)) classData[cls].schedule[sess]=days;
-  if (payload.extraTeachers) for (const [group,teachers] of Object.entries(payload.extraTeachers)) if (TEACHER_GROUPS[group]) TEACHER_GROUPS[group].teachers=teachers;
+  if (!payload) return;
+  if (payload.teacherSchedules) {
+    for (const [t,s] of Object.entries(payload.teacherSchedules)) {
+      // Admite profesores novos engadidos desde a app
+      teacherData[t] = s;
+    }
+  }
+  if (payload.teacherDisplayNames) {
+    for (const [t,n] of Object.entries(payload.teacherDisplayNames)) {
+      teacherDisplayNames[t] = n;
+    }
+  }
+  if (payload.classSchedules) {
+    for (const [cls,sessions] of Object.entries(payload.classSchedules)) {
+      if (classData[cls]) {
+        for (const [sess,days] of Object.entries(sessions)) {
+          classData[cls].schedule[sess] = days;
+        }
+      }
+    }
+  }
+  if (payload.extraTeachers) {
+    for (const [group,teachers] of Object.entries(payload.extraTeachers)) {
+      if (TEACHER_GROUPS[group]) TEACHER_GROUPS[group].teachers = teachers;
+    }
+  }
 }
+
+// Garda en Firebase + localStorage como respaldo
 function saveToStorage() {
-  try { localStorage.setItem('cpi_lopez_suarez_horarios_v1', JSON.stringify(buildPayload())); } catch(e) {}
+  const payload = buildPayload();
+  // Sempre gardamos en localStorage como fallback
+  try { localStorage.setItem('cpi_lopez_suarez_horarios_v1', JSON.stringify(payload)); } catch(e) {}
+  // Se Firebase está listo, sincronizamos na nube
+  if (window._firebaseReady && window._fbSave) {
+    window._fbSave(payload);
+  }
 }
+
 function loadFromLocalStorage() {
   try {
     const raw = localStorage.getItem('cpi_lopez_suarez_horarios_v1');
     if (raw) applyRemoteData(JSON.parse(raw));
-  } catch(e) {}
+  } catch(e) { console.warn('Error cargando localStorage:', e); }
 }
 
-// BOOT
+// Chamado polo módulo Firebase cando está listo
+window._firebaseModuleReady = function() {
+  window._firebaseReady = true;
+  // Escoitar cambios en tempo real doutros dispositivos
+  window._fbListen((data) => {
+    if (data) {
+      applyRemoteData(data);
+      renderTeacherGroups();
+      renderCourseGrid();
+      renderGuardias();
+      if (selectedTeacher) renderSchedule(selectedTeacher);
+      if (selectedClass)   renderClassSchedule(selectedClass);
+    }
+  });
+  // Carga inicial desde Firebase
+  window._fbLoad().then(data => {
+    if (data) {
+      applyRemoteData(data);
+      renderTeacherGroups();
+      renderCourseGrid();
+      renderGuardias();
+      if (selectedTeacher) renderSchedule(selectedTeacher);
+      if (selectedClass)   renderClassSchedule(selectedClass);
+      showToast('☁️ Datos sincronizados con Firebase');
+    } else {
+      // Primeira vez: migrar localStorage → Firebase
+      const local = localStorage.getItem('cpi_lopez_suarez_horarios_v1');
+      if (local) {
+        try { applyRemoteData(JSON.parse(local)); saveToStorage(); } catch(e) {}
+      }
+    }
+  }).catch(() => loadFromLocalStorage());
+};
+
+// Chamado polo módulo Firebase se falla (sen conexión, etc.)
+window._firebaseModuleFailed = function() {
+  console.warn('Firebase non dispoñible — usando localStorage');
+  loadFromLocalStorage();
+};
+
+// BOOT — init carga datos locais mentres Firebase arranca en paralelo
 init();
 setTimeout(() => document.getElementById('splash').classList.add('hidden'), 1800);
+</script>
+
+<!-- ═══════════════════════════════════════════════════════════
+     FIREBASE REALTIME DATABASE — módulo ES
+     Carga en paralelo co script principal.
+     Chama a window._firebaseModuleReady() ou _firebaseModuleFailed()
+═══════════════════════════════════════════════════════════ -->
+<script type="module">
+  import { initializeApp }  from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
+  import { getDatabase, ref, set, get, onValue }
+    from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js';
+
+  // ── Configuración Firebase (proxecto compartido con CEIP Monforte) ──
+  const FIREBASE_CONFIG = {
+    apiKey:            "AIzaSyB8A0i7Uw8FoqJbr0dDRhXHBKZ4NvhPafQ",
+    authDomain:        "jefaturapp-3ce05.firebaseapp.com",
+    databaseURL:       "https://jefaturapp-3ce05-default-rtdb.europe-west1.firebasedatabase.app",
+    projectId:         "jefaturapp-3ce05",
+    storageBucket:     "jefaturapp-3ce05.firebasestorage.app",
+    messagingSenderId: "515813108120",
+    appId:             "1:515813108120:web:6235f217ff38912fc9a3ed"
+  };
+
+  // ── Ruta exclusiva para o CPI López Suárez (distinta á do CEIP Monforte) ──
+  const DB_PATH = 'cpi_lopez_suarez/horarios_v1';
+
+  try {
+    // Usamos un nome de app distinto para evitar conflito se ambas apps están abertas
+    const app   = initializeApp(FIREBASE_CONFIG, 'cpi-lopez-suarez');
+    const db    = getDatabase(app);
+    const dbRef = ref(db, DB_PATH);
+
+    const dot = document.getElementById('db-status');
+
+    // Funcións expostas ao script principal
+    window._fbSave = (payload) =>
+      set(dbRef, payload)
+        .then(() => {
+          if (dot) { dot.style.background = '#a8d88a'; dot.style.boxShadow = '0 0 8px #a8d88a'; dot.title = 'Gardado en Firebase ✅'; }
+          setTimeout(() => { if (dot) { dot.style.background = '#a8d88a'; dot.title = 'Conectado a Firebase'; } }, 2500);
+        })
+        .catch(e => {
+          console.warn('Error gardando en Firebase:', e);
+          if (dot) { dot.style.background = '#e08060'; dot.title = 'Erro ao gardar en Firebase'; }
+        });
+
+    window._fbLoad   = () => get(dbRef).then(snap => snap.val());
+    window._fbListen = (cb) => onValue(dbRef, snap => cb(snap.val()));
+
+    if (dot) {
+      dot.style.background = '#a8d88a';
+      dot.style.boxShadow  = '0 0 6px #a8d88a';
+      dot.title = 'Conectado a Firebase';
+    }
+
+    console.log('✅ Firebase conectado — CPI Dr. López Suárez');
+    window._firebaseModuleReady();
+
+  } catch(e) {
+    console.warn('Firebase fallou:', e);
+    const dot = document.getElementById('db-status');
+    if (dot) { dot.style.background = '#e08060'; dot.title = 'Firebase non dispoñible — modo local'; }
+    window._firebaseModuleFailed();
+  }
 </script>
 </body>
 </html>
